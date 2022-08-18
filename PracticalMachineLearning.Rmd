@@ -1,0 +1,180 @@
+---
+title: "Practical Machine Learning"
+author: "Lorenz Hexemer"
+date: "14 8 2022"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Executive Summary
+
+Accelerometers can be used to quantify body movement. The data used in this project is collected from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The goal of this project is to predict the manner in which they did these exercises. To achieve this, after an exploratory data analysis, different machine learning models will be applied and compared in their performance in prediction. Cross validation will be used to estimate the out of sample error.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(GGally)
+library(caret)
+library(corrplot)
+library(ranger)
+library(factoextra)
+library(MLmetrics)
+library(cowplot)
+library(randomForest)
+```
+
+# Data import and cleaning
+
+```{r}
+  full_data <- read.csv("pml-training.csv",  na.strings=c("NA","#DIV/0!", ""))
+  full_data <- full_data[,colSums(is.na(full_data)) == 0]
+  full_data <- full_data[,-c(1:7)]
+  
+  varNames <- names(full_data)
+  for (i in 1:(length(varNames)-1)) {
+    full_data[,i] <- as.numeric(full_data[,i])
+  }
+  
+  subSamples <- createDataPartition(y=full_data$classe, p=0.75, list=FALSE)
+  subTraining <- full_data[subSamples, ] 
+  subTesting <- full_data[-subSamples, ]
+  table(subTraining$classe)
+```
+First, variables that contain only NaNs are removed. Moreover, the X variable is removed since the data set is sorted according to the classes. Therefore, this variable implicitly labeles the classes. Moreover, the first 6 variables ("user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp",       "new_window" and "num_window") are removed since they do not encode data on the movements. 
+
+The 5 classes A to E correspond to the different ways, the barbell lifts were performed. The classes are unevenly represented in the dataset: Class A is occuring signifficantly more often than the other classes.
+
+# Data analysis
+
+## Exploratory Data Analysis
+
+```{r r, echo=FALSE}
+f2 <- ggpairs(subTraining,columns = 1:7, aes(col=classe, alpha=0.5));
+corrplot(cor(subTesting[,1:52]),tl.col = "black")
+```
+
+Many variables are uncorrelated and hence probably contribute independent information. In No sigle variable or combination of two variables, a clear separation of the classes is observable.
+
+```{r,echo=TRUE}
+pcaResult <- prcomp(subTraining[,-53],scale=TRUE);
+f3 <- fviz_eig(pcaResult);
+f4 <- fviz_pca_ind(pcaResult,col.ind = subTraining$classe, geom = "point");
+f5 <- fviz_pca_var(pcaResult);
+```
+The first two prinicpal components contribute ~ 15% of explained variability. Still, the classes seem not easily seperatable in the PCA (figures see appendix).
+
+## Modeling
+
+Different models are trained on the same data: A logistic regression model, decision trees with and without boosting and random forest.
+In the next section, the best model is slected.
+
+### Logistic Model
+
+```{r Logit Fit, message=FALSE, warning=FALSE, results='hide'}
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 1, 
+                     classProbs = TRUE,
+                     #preProcOptions =  list(pcaComp = 46),
+                     summaryFunction = multiClassSummary,
+                     verbose = FALSE)
+
+logitModel <- train(classe ~ ., subTraining, 
+                     method = "multinom", 
+                     family=binomial, 
+                     metric = "Accuracy",  
+                     verbose = FALSE, 
+                     preProcess=c("center", "scale"), #,"pca"
+                     trControl = ctrl)
+
+predictTest <- predict(logitModel,subTesting)
+logitConfusion <- confusionMatrix(subTesting$classe, predictTest)
+logitOSPR <- mean(predictTest != subTesting$classe)
+print(logitConfusion)
+```
+
+## Decision Tree
+
+As an alternative, a decision tree model is fitted.
+
+```{r tree , message=FALSE, warning=FALSE}
+library(rpart)
+decisionTree <- rpart(classe ~ ., data=subTraining, method="class");
+predictTest <- predict(decisionTree,subTesting, type = "class")
+treeOSPR <- mean(predictTest != subTesting$classe)
+treeConfusion <- confusionMatrix(predictTest, subTesting$classe);
+print(treeConfusion)
+```
+
+The performance of decision trees can be improved by boosing.
+
+```{r boosing, message=FALSE, warning=FALSE}
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 5, 
+                     classProbs = TRUE,
+                     #preProcOptions =  list(pcaComp = 46),
+                     summaryFunction = multiClassSummary)
+
+boostedTree <- train(classe ~ ., subTraining, 
+                     method = "gbm", 
+                     metric = "Accuracy",  
+                     verbose = FALSE, 
+                     preProcess=c("center", "scale"), #,"pca"
+                     trControl = ctrl)
+
+predictTest <- predict(boostedTree,subTesting)
+boostTreeOSPR <- mean(predictTest != subTesting$classe)
+boostTreeConfusion <- confusionMatrix(subTesting$classe, predictTest);
+print(boostTreeConfusion)
+
+```
+### Random Forest
+
+```{r}
+randomForestModel <- randomForest(classe ~ ., data=subTraining, method="class")
+predictTest <- predict(randomForestModel,subTesting)
+randForestOSPR <- mean(predictTest != subTesting$classe)
+randForestConfusion <- confusionMatrix(subTesting$classe, predictTest)
+print(randForestConfusion)
+```
+
+
+# Model Selection and Discussion
+
+To compare the performance, the out of sample error was used. The out of sample error was  estimated by evaluating the prediction performance on the test-dataset which was not used for fittig. 
+
+```{r}
+OSPR <- data.frame(Model=c("Logistic Model","Decision Tree","Boosted Decision Tree","Random Forest"),OSPR=c(logitOSPR,treeOSPR,boostTreeOSPR,randForestOSPR))
+ggplot(OSPR,aes(y=OSPR,x=Model)) + geom_bar(stat="identity")
+```
+
+The Decision Tree model did not perform better than the logistic model. The gradient boosting, though, improved the performance of the Decision Tree to achieve a out of sample error < 5%. Finally, the Random Forest model is selected for the prediction since its out of sample error is estimated to be < 1%.
+
+# Prediction
+
+In this section, the best model is used to predict the outcome of the 20 cases from the independent testing dataset.
+
+```{r}
+  full_data <- read.csv("pml-testing.csv",  na.strings=c("NA","#DIV/0!", ""))
+  full_data <- full_data[,colSums(is.na(full_data)) == 0]
+  full_data <- full_data[,-c(1:7)]
+  
+  varNames <- names(full_data)
+  for (i in 1:(length(varNames)-1)) {
+    full_data[,i] <- as.numeric(full_data[,i])
+  }
+  predict(randomForestModel,full_data)
+```
+
+
+# Appendix
+```{r}
+f2
+f3
+f4
+f5
+```
+
